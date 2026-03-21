@@ -1,1 +1,218 @@
+################################################  R codes for simulation studies running on HPCC  ############################################################################################
+
+args <- commandArgs(TRUE)
+gg <- as.integer(args[1])
+
+pkgs <- list("hdi","MASS","fda","glmnet", "doParallel", "foreach","fdapace","metap","car","grpreg","mgcv","Rcpp","RcppEigen","sensitivitymv","refund")
+lapply(pkgs, require, character.only = T)
+source("himasis.R")
+source("Wilks.R")
+source("lasso.proj_new.R")
+source("MakeFunctionData.R")
+source("helpers.R")
+source("helpers.nodewise.R")
+source("summary.Anova.mlm.R")
+source("flm_fpca_fan.R")
+
+n <- 400   
+N <- 100           
+logic_num <- 2
+################################################################################################################
+rho <- 0
+group_num <- 4
+dim1 <- 4
+K1 <- 4
+t1 <- seq(0,1,length = N)
+tlength <- 1
+###################################################################################################################
+###################################################################################################################
+series <- rep(dim1,group_num)
+s_vecter1 <- c(1:series[1])
+s_vecter3 <- c((1 + sum(series[c(1:2)])):(sum(series[c(1:3)])))
+
+set.seed(gg + 12345)
+X <- t(t(rbinom(n,1,0.5)))
+
+M_tuta_fpc <- list()
+M_values_tuta <- list()
+for (J in 1:group_num){
+m <<- series[J]
+sigma = matrix(0,m,m)
+for (i in 1:m)
+{
+	for (j in 1:m)
+	{
+		sigma[i,j] = rho^(abs(i - j))
+	}  
+}
+
+alpha <- rep(0,m)
+if (J == 1){
+alpha[1:4] <- seq(0.2,0.5,by = 0.1)
+} else if (J == 2){
+alpha[1:4] <- seq(0.2,0.5,by = 0.1)
+} else {
+alpha[1:m] <- rep(0,m)
+}
+alpha1 <- matrix(alpha,1,)
+x_and_alpha <<- X%*%alpha1
+
+ava <- rep(0,m)
+set.seed(gg + J)
+e = mvrnorm1(n,ava,sigma)
+
+M_tuta <- matrix(0,n,m)
+for (L in 1:n){
+set.seed(gg + L)
+	M_tuta[L,] = e[L,] + x_and_alpha[L,]
+}
+
+f2 <- matrix(0, nrow = K1, ncol = N) 
+tt <- t1/tlength
+f2[1,] <- rep(1,N)*sqrt(1/tlength)
+f2[2,] <- sqrt(3/tlength)*(2*tt - 1)
+f2[3,] <- sqrt(5/tlength)*(6*tt^2 - 6*tt + 1)
+f2[4,] <- sqrt(7/tlength)*(20*tt^3 - 30*tt^2 + 12*tt - 1)
+
+M <- matrix(0,n,N)
+for (j in 1:n){
+M[j,] <- apply((M_tuta[j,]%*%t(rep(1,N)))*f2, 2,sum)
+ava1 <- rep(0,N)
+sigma1 = matrix(0,N,N)
+for (i in 1:N)
+{
+	for (j in 1:N)
+	{
+		sigma1[i,j] = rho^(abs(i - j))
+	}  
+}
+set.seed(J + 10121)
+e1 = mvrnorm1(n,ava1,1.5*sigma1)
+M_values_tuta[[J]] <- M + e1
+M_tuta_fpc[[J]] <- M_tuta
+}
+}
+
+M_tuta_fpc1 <- Reduce(cbind,M_tuta_fpc)
+M_tuta_fpc1_and_X <- cbind(M_tuta_fpc1,X)
+
+set.seed(gg + 19861)
+a1 <- sample(s_vecter1,size = K1,replace = F)
+set.seed(gg + 19883)
+c1 <- sample(s_vecter3,size = K1,replace = F)
+
+beta = rep(0,sum(series))
+beta[a1] <- rep(0.1,K1)
+beta[c1] <- rep(0.1,K1)
+
+B <- c(beta,0.2)
+set.seed(gg + 12321)
+E <- t(t(rnorm(n, mean = 0, sd = 1)))
+Y0 <- -3.5 + M_tuta_fpc1_and_X%*%t(t(B))
+if (logic_num == 1){ 
+Y <- Y0 + E
+} else { 
+Y <<- matrix(rbinom(n,1,1/(1 + exp(-Y0))),nrow = n)
+}  
+####################################################################################################################################
+####################################################################################################################################
+fpca_fda_set <- list()
+Mrg_test_P <- matrix(0,2,length(M_values_tuta))
+for (ss in 1:length(M_values_tuta)){
+num_sites <- dim(M_values_tuta[[ss]])[2] 
+fpca.res <- fpca.sc(scale(M_values_tuta[[ss]]), argvals = c(1:num_sites), pve = 0.95, var = TRUE)
+fpca_fda_set[[ss]] <- fpca.res$scores
+colnames(fpca_fda_set[[ss]]) <- paste0("fda_group-",ss,"-",1:fpca.res$npc)
+#################################################################################################################################
+multivate_regression_fit <- lm(cbind(as.matrix(fpca_fda_set[[ss]]))~X)
+test_Anova <- Anova(multivate_regression_fit)
+test_summary <- summary.Anova.mlm(test_Anova)
+test_summary_x <- test_summary$multivariate.tests$`X`
+SSPE.qr <- qr(test_summary_x$SSPE)
+eigs <- Re(eigen(qr.coef(SSPE.qr, test_summary_x$SSPH), symmetric = FALSE)$values)
+test_wilks <- Wilks(eigs, test_summary_x$df, test_summary_x$df.residual)
+test_p <- pf(test_wilks[2], test_wilks[3], test_wilks[4],lower.tail=FALSE)
+Mrg_test_P[1,ss] <- test_wilks[1]
+Mrg_test_P[2,ss] <- test_p
+}
+colnames(Mrg_test_P) <- paste0("group-",1:length(M_values_tuta),"-fda")
+x1 <- matrix(X,n,) 
+###############################################################################################################################
+fda_P_values <- Mrg_test_P[2,]
+fpca_fda_set1 <- Reduce(cbind,fpca_fda_set)
+aim_genes_matrix_fda <- cbind(fpca_fda_set1,x1)
+set.seed(gg + 123456) 
+if (logic_num == 1){
+hdi_lasso_fda <- lasso.proj(aim_genes_matrix_fda,Y)
+} else {
+hdi_lasso_fda <- lasso.proj(aim_genes_matrix_fda,Y,family="binomial")
+}
+all_pvalues_fda <- as.matrix(hdi_lasso_fda$pval,1)
+####################################################################################################################
+group_hdi_fda <- list()
+for (f in 1:length(fpca_fda_set)){ 
+#print(f)
+group_hdi_fda[[f]] <- rep(f,ncol(fpca_fda_set[[f]]))
+} 
+###################################################################################################################
+group_hdi_vector_fda <- as.matrix(unlist(group_hdi_fda),1)
+com_P_fda <- cbind(all_pvalues_fda[1:dim(fpca_fda_set1)[2]],group_hdi_vector_fda)
+com_P_fda <- cbind(com_P_fda,seq(1:(dim(com_P_fda)[1])))
+colnames(com_P_fda) <- c("P_value","Index","Order")
+
+P_com_fda_fisher <- list()
+group_test_fda <- list()
+P_com_fda_Cauchy <- list()
+for (j1 in 1:length(fpca_fda_set)){
+# print(j1)
+index_fda <- which(com_P_fda[,2] == j1)
+group_P_fda <- com_P_fda[,1][index_fda]
+group_test_fda[[j1]] <- com_P_fda[,3][index_fda]
+if (length(group_P_fda) == 1){
+P_com_fda_fisher[[j1]] <- group_P_fda
+P_com_fda_Cauchy[[j1]] <- group_P_fda
+} else { 
+P_com_fda_fisher[[j1]] <- sumlog1(group_P_fda)[3]
+P_com_fda_Cauchy[[j1]] <- cauchy_pval(group_P_fda)
+}
+}
+##################################################################################################################
+group_pvalue_fda <- hdi_lasso_fda$groupTest(group_test_fda)
+###########################################    Setting colnames    ##############################################
+note_total_fda <- c()
+for (j3 in 1:length(fpca_fda_set)){
+#print(j3)
+note_total_fda[j3] <- colnames(fpca_fda_set[[j3]])[1]
+}
+####################################             Resampling from the distrbution            ########################
+###########    Fisher combine P_value    ###########################################################################
+final_fisher_fda <- unlist(P_com_fda_fisher)
+###########    Max statistics P_value    ###########################################################################
+final_max_fda <- group_pvalue_fda
+###########    Cauchy combine P_value    ###########################################################################
+final_cauchy_fda <- unlist(P_com_fda_Cauchy)
+###################################################################################################################
+ending_P_values_fda <- rbind(fda_P_values,final_fisher_fda,final_max_fda,final_cauchy_fda)
+colnames(ending_P_values_fda) <- note_total_fda
+rownames(ending_P_values_fda) <- c("P_alpha","Fisher_P_fda","Min_P_fda","Cauchy_P_fda")
+
+#####################################################################################################################
+guru <- rep(gg,5)
+guru2 <- ending_P_values_fda
+guru3 <- cbind(guru,guru2)
+#####################################################################################################################
+write.csv(guru3,paste0('A_fpca_output_',n,"_",N,"_",dim1,"_",gg,"_","FPC"))
+######################################################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
 
