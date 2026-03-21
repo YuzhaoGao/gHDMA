@@ -5,15 +5,10 @@ gg <- as.integer(args[1])
 
 pkgs <- list("hdi","MASS","fda","glmnet", "doParallel", "foreach","fdapace","metap","car","grpreg","mgcv","Rcpp","RcppEigen","sensitivitymv","refund")
 lapply(pkgs, require, character.only = T)
-source("himasis.R")
+##############################################################################################################
 source("Wilks.R")
-source("lasso.proj_new.R")
-source("MakeFunctionData.R")
-source("helpers.R")
-source("helpers.nodewise.R")
 source("summary.Anova.mlm.R")
-source("flm_fpca_fan.R")
-
+##############################################################################################################
 n <- 400   
 N <- 100           
 logic_num <- 2
