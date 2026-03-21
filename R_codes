@@ -1,1 +1,255 @@
-
+##############################################  Case study analysis codes  #############################################################################
+####                                                                                                                                                ####
+############################################## Importing necessary R packages ##########################################################################
+pkgs <- list("hdi","MASS","fda","glmnet", "metap","car","grpreg","mgcv","Rcpp", "RcppEigen","sensitivitymv", "refund", "fields","mgcv", "refund.shiny")
+lapply(pkgs, require, character.only = T) 
+#############################################   Importing analytical functions and actual data  ########################################################
+source("Wilks.R")
+source("summary.Anova.mlm.R")   
+load(file = "D:/Researches/Data/GSE72680_methy_422.Rdata")
+load(file = "D:/Researches/Data/GSE72680_pdata_422.Rdata")
+load(file = "D:/Researches/Data/tag.rda")
+######################################################################################################################
+cov <- dat
+cov <- cov[!is.na(cov$treat.PTSD),]
+cov1 <- cov[cov$treat.PTSD == "No",]
+#######################################################################################################################
+cov1$Adult_Dep <- NA
+cov1$Adult_Dep[cov1$BDI >= 14] = 1
+cov1$Adult_Dep[cov1$BDI < 14] = 0
+cov1 <- cov1[!is.na(cov1$Adult_Dep),]
+cov1 <- cov1[cov1$race == 1,]
+cov1 <- cov1[, -c(2:4, 15:28)]                                              ##### Screening the significant variables
+cov1 <- cov1[!is.na(cov1$bmi), ]
+######################################################################################################################
+cov1 <- cov1[, -9]
+cov1 <- na.omit(cov1)
+meth <- expr[,pmatch(rownames(cov1), colnames(expr))]
+covariables <- cov1[,2:4]
+cell <- cov1[,c(6:10)]
+x <- cov1$sexual.abuse
+x <- as.numeric(x)
+x[x == 1] <- 0
+x[x == 2] <- 1
+x <- as.matrix(x)
+y <- cov1$Adult_Dep
+n <- NROW(y)
+d <- ceiling(2*n/log(n))
+meth1 <- t(meth)
+total1 <- as.data.frame(meth1)
+#####################################################################################################################
+cross <- intersect(rownames(meth),gpl1$Name)
+index <- which(cross %in% gpl1$Name)
+gene_name <- gpl1$gene_name[index]
+# gpl <- cbind(cross,gene_name)
+gp <- cbind(cross,gene_name)
+gp2 <- gp[order(gp[,2]),]                          # Sort the whole data # pay attention to an useful packages dplyr
+expr1 <- meth[index,]
+genes <- unique(gene_name)
+methy <- list()
+for (i in 1:length(genes)){
+if(i%%1000 == 0) cat(i/1000,"\n")
+methy[[i]] <- t(meth[which(gene_name == genes[i]),])
+}
+id <- list()# gene---sites
+for(i in 1:length(methy)){
+  if(i%%500 == 0) cat(i/500,"\n")
+  id[[i]] <- colnames(methy[[i]])
+}
+#######################################################################################################
+len <- c()
+for (i in 1:length(methy)){
+if(i%%1000 == 0) cat(i/1000,"\n")
+len[i] <- dim(matrix(as.matrix(methy[[i]]),n,))[2]
+}
+clue1 <- which(len == 1)
+clue2 <- which(len == 2)
+clue3 <- which(len == 3)
+clue4 <- which(len == 4)
+clue  <- c(clue1,clue2,clue3,clue4)       ###### Canceal some genes that only include smaller than and equal to 3 sites
+pointer <- (1:length(methy))[-clue]
+methy1 <- methy[-clue]                    
+genes1 <- genes[-clue]                    
+methy3 <- methy[clue] 
+genes2 <- genes[clue]
+methy2 <- list()
+for (i in 1:length(methy1)){
+if(i%%1000 == 0) cat(i/1000,"\n")  
+methy2[[i]] <- log(methy1[[i]]/(1-methy1[[i]]))
+}
+##################################################
+methy4 <- list()
+for (i in 1:length(methy3)){
+if(i%%1000 == 0) cat(i/1000,"\n")  
+methy4[[i]] <- log(methy3[[i]]/(1-methy3[[i]]))
+}
+#######################################################################################################
+####################                        fda packages                ###############################
+#######################################################################################################
+fpca_fda_set <- list()
+Mrg_test_P <- matrix(0, 2, length(methy2))
+for (ss in 1:length(methy2)){
+if(ss %% 1000 == 0) cat(ss/1000,"\n")
+scope <- scale(methy2[[ss]])
+w1 <- 0
+w2 <- 1
+n_points <- dim(methy2[[ss]])[2]
+  if (n_points <= 10) {
+    nbasis <- max(4, n_points - 2)
+  } else if (n_points <= 50) {
+    nbasis <- min(20, n_points)
+  } else {
+    nbasis <- 25
+  }
+### Creating basis functions and performing smoothing
+Mobj <- create.bspline.basis(c(w1, w2), norder = 4, nbasis = nbasis)
+argvals <- seq(w1, w2, len = n_points)
+Mfd <- smooth.basis(argvals, t(scope), Mobj)$fd
+  # Functional PCA - Setting Principal Component number
+  # nharm. It cannot exceed the number of samples minus 1, nor can it exceed the number of basis functions.
+max_harm <- min(n - 1, nbasis, 20)  
+Mpcaobj <- pca.fd(Mfd, nharm = max_harm, harmfdPar = fdPar(Mfd))
+varperc <- Mpcaobj$varprop
+###################################################################################################################################
+cue <- 1
+end_vec <- varperc[cue]
+while (sum(end_vec) <= 0.90){
+cue <- cue + 1
+end_vec <- c(end_vec,varperc[cue])
+}
+m1 <- Mpcaobj$scores[,c(1:length(end_vec))]
+m2 <- matrix(m1,n,)
+fpca_fda_set[[ss]] <- m2
+colnames(fpca_fda_set[[ss]]) <- paste0(genes1[ss],"_",ss,"_", 1:length(end_vec))
+#################################################################################################################################
+if (dim(fpca_fda_set[[ss]])[2] == 1) {
+linear.fit <- lm(fpca_fda_set[[ss]]~ x + data.matrix(cell))
+Mrg_test_P[1,ss] <- summary(linear.fit)$coefficients[2,1]
+Mrg_test_P[2,ss] <- summary(linear.fit)$coefficients[2,4]
+} else {
+multivate_regression_fit <- lm(cbind(as.matrix(fpca_fda_set[[ss]]))~x + data.matrix(cell))
+#lh.out <- linearHypothesis(multivate_regression_fit,hypothesis.matrix = c("x_and_cell$x=0","x_and_cell$Bcell=0","x_and_cell$CD4T = 0", "x_and_cell$CD8T= 0","x_and_cell$Grau=0","x_and_cell$Mono=0"))
+test_Anova <- Anova(multivate_regression_fit)
+test_summary <- summary.Anova.mlm(test_Anova)
+test_summary_x <- test_summary$multivariate.tests$`x`
+SSPE.qr <- qr(test_summary_x$SSPE)
+eigs <- Re(eigen(qr.coef(SSPE.qr, test_summary_x$SSPH), symmetric = FALSE)$values)
+test_wilks <- Wilks(eigs, test_summary_x$df, test_summary_x$df.residual)
+test_p <- pf(test_wilks[2], test_wilks[3], test_wilks[4],lower.tail=FALSE)
+Mrg_test_P[1,ss] <- test_wilks[1]
+Mrg_test_P[2,ss] <- test_p
+}
+}
+colnames(Mrg_test_P) <- paste0(genes1,"_", 1:length(methy2), "_fda")
+x1 <- matrix(x, n,) 
+###############################################################################################################################
+Mrg_test_P1 <- matrix(0, 2, length(methy4))
+for (ss in 1:length(methy4)){
+if(ss %% 100 == 0) cat(ss/100,"\n")
+#################################################################################################################################
+M1 <- matrix(methy4[[ss]],n,)
+if (dim(M1)[2] == 1) {
+linear.fit <- lm(M1~ x + data.matrix(cell))
+Mrg_test_P1[1,ss] <- summary(linear.fit)$coefficients[2,1]
+Mrg_test_P1[2,ss] <- summary(linear.fit)$coefficients[2,4]
+} else {
+multivate_regression_fit <- lm(M1~x + data.matrix(cell))
+#lh.out <- linearHypothesis(multivate_regression_fit,hypothesis.matrix = c("x_and_cell$x=0","x_and_cell$Bcell=0","x_and_cell$CD4T = 0", "x_and_cell$CD8T= 0","x_and_cell$Grau=0","x_and_cell$Mono=0"))
+test_Anova <- Anova(multivate_regression_fit)
+test_summary <- summary.Anova.mlm(test_Anova)
+test_summary_x <- test_summary$multivariate.tests$`x`
+SSPE.qr <- qr(test_summary_x$SSPE)
+eigs <- Re(eigen(qr.coef(SSPE.qr, test_summary_x$SSPH), symmetric = FALSE)$values)
+test_wilks <- Wilks(eigs, test_summary_x$df, test_summary_x$df.residual)
+test_p <- pf(test_wilks[2], test_wilks[3], test_wilks[4],lower.tail=FALSE)
+Mrg_test_P1[1,ss] <- test_wilks[1]
+Mrg_test_P1[2,ss] <- test_p
+}
+}
+colnames(Mrg_test_P1) <- paste0(genes2,"_", 1:length(methy4), "_Nonfda")
+###############################################################################################################################
+Mrg_test_P_total <- cbind(Mrg_test_P, Mrg_test_P1)
+total_P_values <- Mrg_test_P_total[2,]
+aim_total_P_values <- sort(total_P_values)
+aim_total_ID <- which(total_P_values <= aim_total_P_values[d]) 
+aim_total_names <- colnames(Mrg_test_P_total)[aim_total_ID]
+aim_total_Index1 <- which(aim_total_ID <= 13869)
+aim_total_ID1 <- aim_total_ID[aim_total_Index1] 
+aim_total_Index2 <- which(aim_total_ID >= 13869)
+aim_total_ID2 <- aim_total_ID[aim_total_Index2]
+aim_total_ID3 <- aim_total_ID2 - 13869 
+###############################################################################################################
+fda_set <- fpca_fda_set[aim_total_ID1]
+nonfda_set <- list()
+for (i in 1:length(aim_total_ID3)){
+print(i)
+count <- aim_total_ID3[i]
+M2 <- matrix(methy4[[count]],n,)
+colnames(M2) <- paste0(genes2[count],"_", 1:dim(M2)[2], "_Nonfda")
+nonfda_set[[i]] <- M2
+}
+total_fda_and_nonfda_set <- c(fda_set, nonfda_set)
+##################################################################################################################
+aim_genes_fda <- total_fda_and_nonfda_set
+###################################################################################################################
+############################    High-dimensional inference    #####################################################
+aim_genes_fda1 <- aim_genes_fda
+aim_genes_fda[[1 + length(aim_genes_fda)]] <- x1
+colnames(aim_genes_fda[[length(aim_genes_fda)]]) <- "X"
+aim_genes_matrix_fda0 <- Reduce(cbind,aim_genes_fda)
+aim_genes_matrix_fda <- cbind(aim_genes_matrix_fda0, cell)
+hdi_lasso_fda <- lasso.proj(aim_genes_matrix_fda, y, family = "binomial")
+all_pvalues_fda <- as.matrix(hdi_lasso_fda$pval, 1)
+##################################################################################################################
+##################################################################################################################
+group_hdi_fda <- list()
+for (f in 1:length(aim_genes_fda1)){ 
+print(f)
+group_hdi_fda[[f]] <- rep(f,ncol(matrix(aim_genes_fda1[[f]],n,)))
+} 
+indie <- length(unlist(group_hdi_fda))
+###################################################################################################################
+group_hdi_vector_fda <- as.matrix(unlist(group_hdi_fda), 1)
+com_P_fda <- cbind(all_pvalues_fda[c(1:indie), 1], group_hdi_vector_fda)
+com_P_fda <- cbind(com_P_fda, seq(1:(dim(com_P_fda)[1])))
+colnames(com_P_fda) <- c("P_value", "Index", "Order")
+###################################################################################################################
+############################    Fisher combine P_value    #########################################################
+P_com_fda_fisher <- list()
+group_test_fda <- list()
+for (j1 in 1:length(aim_genes_fda1)){
+#print(j1)
+index_fda <- which(com_P_fda[,2] == j1)
+group_P_fda <- com_P_fda[,1][index_fda]
+group_test_fda[[j1]] <- com_P_fda[,3][index_fda]
+if (length(group_P_fda) == 1){
+P_com_fda_fisher[[j1]] <- group_P_fda
+} else {
+P_com_fda_fisher[[j1]] <- sumlog(group_P_fda)[3]
+}
+}
+##################################################################################################################
+group_pvalue_fda <- hdi_lasso_fda$groupTest(group_test_fda)
+###########################################    Setting colnames    ###############################################
+note_fda <- c()
+for (j2 in 1:length(aim_fda_ID1)){
+count <- aim_fda_ID1[j2]
+print(count)
+note_fda[j2] <- colnames(fpca_fda_set[[count]])[1]
+}
+###################################################################################################################
+note_total_fda <- c()
+for (j3 in 1:length(fpca_fda_set)){
+print(j3)
+note_total_fda[j3] <- colnames(fpca_fda_set[[j3]])[1]
+}
+###################################################################################################################
+############################    Joint Significance Test    ########################################################
+final_alpha_P_values <- Mrg_test_P_total[aim_total_ID]
+final_fisher_fda <- unlist(P_com_fda_fisher)
+ending_findings <- rbind(final_alpha_P_values, final_fisher_fda)
+colnames(ending_findings) <- aim_total_names
+rownames(ending_findings) <- c("P_alpha","Fisher_P_fda")
+upshots <- apply(ending_findings, 2, max)
+index_v1 <- which(upshots < 0.05) 
+upshots[index_v1]
