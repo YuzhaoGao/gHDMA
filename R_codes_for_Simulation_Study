@@ -1,5 +1,4 @@
-################################################  R codes for simulation studies running on HPCC  ############################################################################################
-
+####################  R codes for simulation studies running on High Performance Computing Cluster (HPCC)  ########################
 args <- commandArgs(TRUE)
 gg <- as.integer(args[1])
 
@@ -9,8 +8,8 @@ lapply(pkgs, require, character.only = T)
 source("Wilks.R")
 source("summary.Anova.mlm.R")
 ##############################################################################################################
-n <- 400   
-N <- 100           
+n <- 400       # sample size
+N <- 100         
 logic_num <- 2
 ################################################################################################################
 rho <- 0
