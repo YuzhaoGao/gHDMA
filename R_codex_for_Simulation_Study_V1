@@ -1,1 +1,373 @@
+ 1. DATA GENERATION FUNCTION
+#==============================================================================
+#' Generate simulated data for high-dimensional mediation analysis
+#'
+#' @param n          Sample size (default = 400)
+#' @param N          Number of grid points / CpG sites per gene region (default = 100)
+#' @param group_num  Number of gene regions (default = 4)
+#' @param dim1       Dimension (number of CpG sites) per gene region (default = 4)
+#' @param K1         Number of active FPC components (default = 4)
+#' @param rho        Autocorrelation parameter for error covariance (default = 0)
+#' @param logic_num  Outcome type: 1 = continuous, 2 = binary (default = 2)
+#' @param seed       Random seed for reproducibility
+#'
+#' @return A list containing:
+#'   $X              - Exposure variable (n x 1)
+#'   $Y              - Outcome variable (n x 1)
+#'   $M_values_list  - List of observed methylation matrices (one per gene region)
+#'   $M_tuta_list    - List of true underlying mediator values (one per gene region)
+#'   $alpha           - True alpha coefficients (mediation effects)
+#'   $beta            - True beta coefficients (outcome effects)
+#'   $active_set_1    - Indices of active mediators in group 1
+#'   $active_set_3    - Indices of active mediators in group 3
+#'   $series          - Vector of dimensions for each gene region
+gen_sim_data <- function(n = 400, N = 100, group_num = 4, dim1 = 4,
+                         K1 = 4, rho = 0, logic_num = 2, seed = 12345) {
+  
+  set.seed(seed)
+  
+  #--- Design parameters ---
+  series <- rep(dim1, group_num)          # each gene region has 'dim1' CpG sites
+  t1 <- seq(0, 1, length = N)
+  tlength <- 1
+  
+  #--- Exposure X: binary ---
+  X <- matrix(rbinom(n, 1, 0.5), ncol = 1)
+  
+  #--- Identify active mediator positions ---
+  s_vector1 <- c(1:series[1])
+  s_vector3 <- c((1 + sum(series[1:2])):(sum(series[1:3])))
+  
+  #--- Orthogonal basis functions on [0,1] ---
+  tt <- t1 / tlength
+  f2 <- matrix(0, nrow = K1, ncol = N)
+  f2[1, ] <- rep(1, N) * sqrt(1 / tlength)
+  f2[2, ] <- sqrt(3 / tlength) * (2 * tt - 1)
+  f2[3, ] <- sqrt(5 / tlength) * (6 * tt^2 - 6 * tt + 1)
+  f2[4, ] <- sqrt(7 / tlength) * (20 * tt^3 - 30 * tt^2 + 12 * tt - 1)
+  
+  #--- Generate mediators for each gene region ---
+  M_values_list <- list()
+  M_tuta_list   <- list()
+  
+  for (J in 1:group_num) {
+    m <- series[J]
+    
+    # Covariance matrix with AR(1) structure
+    sigma <- matrix(0, m, m)
+    for (i in 1:m) {
+      for (j in 1:m) {
+        sigma[i, j] <- rho^(abs(i - j))
+      }
+    }
+    
+    # Alpha coefficients: only groups 1 and 2 have non-zero effects
+    alpha <- rep(0, m)
+    if (J %in% c(1, 2)) {
+      alpha[1:4] <- seq(0.2, 0.5, by = 0.1)
+    }
+    alpha1 <- matrix(alpha, 1, m)
+    x_and_alpha <- X %*% alpha1            # n x m
+    
+    # Random error for mediators
+    e <- MASS::mvrnorm(n, mu = rep(0, m), Sigma = sigma)
+    
+    M_tuta <- e + x_and_alpha              # True latent mediators (n x m)
+    
+    # Project onto functional basis to get smooth trajectories
+    M <- matrix(0, n, N)
+    for (j in 1:n) {
+      M[j, ] <- apply((M_tuta[j, ] %*% t(rep(1, N))) * f2, 2, sum)
+    }
+    
+    # Add measurement noise
+    sigma1 <- matrix(0, N, N)
+    for (i in 1:N) {
+      for (j in 1:N) {
+        sigma1[i, j] <- rho^(abs(i - j))
+      }
+    }
+    e1 <- MASS::mvrnorm(n, mu = rep(0, N), Sigma = 1.5 * sigma1)
+    
+    M_observed <- M + e1
+    
+    M_values_list[[J]] <- M_observed
+    M_tuta_list[[J]]   <- M_tuta
+  }
+  
+  #--- Outcome Y ---
+  # Combine all latent mediators
+  M_all <- Reduce(cbind, M_tuta_list)
+  M_all_and_X <- cbind(M_all, X)
+  
+  # Select active beta positions
+  set.seed(seed + 999)
+  a1 <- sample(s_vector1, size = K1, replace = FALSE)
+  c1 <- sample(s_vector3, size = K1, replace = FALSE)
+  
+  beta <- rep(0, sum(series))
+  beta[a1] <- rep(0.1, K1)
+  beta[c1] <- rep(0.1, K1)
+  B <- c(beta, 0.2)   # last entry = direct effect of X on Y
+  
+  Y0 <- -3.5 + M_all_and_X %*% matrix(B, ncol = 1)
+  E  <- rnorm(n, mean = 0, sd = 1)
+  
+  if (logic_num == 1) {
+    Y <- Y0 + E
+  } else {
+    prob <- 1 / (1 + exp(-Y0))
+    Y <- matrix(rbinom(n, 1, prob), nrow = n)
+  }
+  
+  #--- Return all components ---
+  result <- list(
+    X = X,
+    Y = Y,
+    M_values_list = M_values_list,
+    M_tuta_list   = M_tuta_list,
+    alpha = alpha,
+    beta  = beta,
+    active_set_1 = a1,
+    active_set_3 = c1,
+    series       = series,
+    N = N,
+    n = n,
+    K1 = K1,
+    group_num = group_num
+  )
+  
+  return(result)
+}
+##############################################################################################################################
+#==============================================================================
+#  2. WILKS' LAMBDA TEST FUNCTION
+#==============================================================================
+#' Perform Wilks' Lambda multivariate test for mediation screening
+#'
+#' @param M_list  List of observed methylation matrices (one per gene region)
+#' @param X       Exposure variable (n x 1 matrix)
+#' @param pve     Proportion of variance explained for FPCA truncation (default = 0.95)
+#'
+#' @return A list containing:
+#'   $p_values       - Vector of p-values from Wilks' Lambda test (one per gene region)
+#'   $stat_values    - Vector of Wilks' Lambda statistics
+#'   $fpc_scores     - List of FPCA scores (one per gene region)
+#'   $npc            - Vector of number of principal components retained
+wilks_lambda_test <- function(M_list, X, pve = 0.95) {
+  
+  n_groups <- length(M_list)
+  fpc_scores <- list()
+  p_values   <- numeric(n_groups)
+  stat_values <- numeric(n_groups)
+  npc_vec    <- numeric(n_groups)
+  
+  for (ss in 1:n_groups) {
+    M_mat <- M_list[[ss]]
+    num_sites <- ncol(M_mat)
+    
+    #--- FPCA via fdapace ---
+    fpca.res <- fdapace::fpca.sc(
+      scale(M_mat),
+      argvals = c(1:num_sites),
+      pve = pve,
+      var = TRUE
+    )
+    
+    scores <- fpca.res$scores
+    npc    <- fpca.res$npc
+    fpc_scores[[ss]] <- scores
+    npc_vec[ss]      <- npc
+    
+    #--- Multivariate regression: FPC scores ~ X ---
+    colnames(scores) <- paste0("PC", 1:npc)
+    dat <- data.frame(scores, X = X)
+    
+    multivar_fit <- lm(as.matrix(dat[, 1:npc]) ~ X)
+    
+    #--- Wilks' Lambda via car::Anova ---
+    av <- car::Anova(multivar_fit)
+    av_summary <- summary.Anova.mlm(av)
+    
+    test_x <- av_summary$multivariate.tests$X
+    
+    # Eigenvalues of SSPE^{-1} SSPH
+    SSPE.qr <- qr(test_x$SSPE)
+    eigs <- Re(eigen(qr.coef(SSPE.qr, test_x$SSPH), symmetric = FALSE)$values)
+    
+    # Wilks' Lambda statistic and p-value
+    wl <- Wilks(eigs, test_x$df, test_x$df.residual)
+    
+    stat_values[ss] <- wl[1]   # Wilks' Lambda statistic
+    p_values[ss]     <- pf(wl[2], wl[3], wl[4], lower.tail = FALSE)
+  }
+  
+  result <- list(
+    p_values    = p_values,
+    stat_values = stat_values,
+    fpc_scores  = fpc_scores,
+    npc         = npc_vec
+  )
+  
+  return(result)
+}
+###################################################################################################################
+#==============================================================================
+#  3. MAIN SIMULATION DRIVER
+#==============================================================================
+#' Run a complete simulation replicate
+#'
+#' @param seed       Random seed for this replicate
+#' @param n          Sample size
+#' @param N          Number of grid points per gene region
+#' @param dim1       Dimension per gene region
+#' @param group_num  Number of gene regions
+#' @param K1         Number of active FPC components
+#' @param rho        Autocorrelation parameter
+#' @param logic_num  Outcome type: 1 = continuous, 2 = binary
+#' @param pve        Proportion of variance explained for FPCA
+#'
+#' @return A matrix of p-values with rows:
+#'   P_alpha, Fisher_P, Min_P, Cauchy_P
+#'   and columns named by gene region.
+run_simulation <- function(seed, n = 400, N = 100, dim1 = 4, group_num = 4,
+                           K1 = 4, rho = 0, logic_num = 2, pve = 0.95) {
+  
+  cat(sprintf("[Seed %d] Generating data...\n", seed))
+  
+  #--- Step 1: Generate data ---
+  sim_data <- gen_sim_data(
+    n = n, N = N, group_num = group_num, dim1 = dim1,
+    K1 = K1, rho = rho, logic_num = logic_num, seed = seed
+  )
+  
+  X <- sim_data$X
+  Y <- sim_data$Y
+  M_list <- sim_data$M_values_list
+  
+  #--- Step 2: Wilks' Lambda screening via FPCA ---
+  cat(sprintf("[Seed %d] Running Wilks' Lambda test...\n", seed))
+  
+  wl_res <- wilks_lambda_test(M_list, X, pve = pve)
+  
+  fpc_scores <- wl_res$fpc_scores
+  fda_P_values <- wl_res$p_values
+  
+  # Name the FPC score columns
+  for (f in 1:length(fpc_scores)) {
+    colnames(fpc_scores[[f]]) <- paste0("fda_group-", f, "-", 1:ncol(fpc_scores[[f]]))
+  }
+  
+  #--- Step 3: Combine FPC scores and run de-sparsified Lasso ---
+  cat(sprintf("[Seed %d] Fitting de-sparsified Lasso...\n", seed))
+  
+  fpca_all <- Reduce(cbind, fpc_scores)
+  design_matrix <- cbind(fpca_all, X)
+  
+  if (logic_num == 1) {
+    hdi_lasso <- hdi::lasso.proj(design_matrix, Y)
+  } else {
+    hdi_lasso <- hdi::lasso.proj(design_matrix, Y, family = "binomial")
+  }
+  
+  all_pvalues <- as.matrix(hdi_lasso$pval, 1)
+  
+  #--- Step 4: Group p-values by gene region ---
+  group_id <- list()
+  for (f in 1:length(fpc_scores)) {
+    group_id[[f]] <- rep(f, ncol(fpc_scores[[f]]))
+  }
+  group_vector <- as.matrix(unlist(group_id), 1)
+  
+  com_P <- cbind(all_pvalues[1:dim(fpca_all)[2]], group_vector)
+  com_P <- cbind(com_P, seq(1:dim(com_P)[1]))
+  colnames(com_P) <- c("P_value", "Index", "Order")
+  
+  #--- Step 5: Combine p-values within each gene region ---
+  fisher_P <- list()
+  cauchy_P <- list()
+  group_test_indices <- list()
+  
+  for (j1 in 1:length(fpc_scores)) {
+    idx <- which(com_P[, 2] == j1)
+    group_p <- com_P[, 1][idx]
+    group_test_indices[[j1]] <- com_P[, 3][idx]
+    
+    if (length(group_p) == 1) {
+      fisher_P[[j1]] <- group_p
+      cauchy_P[[j1]] <- group_p
+    } else {
+      fisher_P[[j1]] <- metap::sumlog(group_p)$p
+      cauchy_P[[j1]] <- cauchy_combine(group_p)
+    }
+  }
+  
+  #--- Step 6: Group test via hdi ---
+  group_pvalue_max <- hdi_lasso$groupTest(group_test_indices)
+  
+  #--- Step 7: Assemble final results ---
+  note_total <- character(length(fpc_scores))
+  for (j3 in 1:length(fpc_scores)) {
+    note_total[j3] <- colnames(fpc_scores[[j3]])[1]
+  }
+  
+  final_fisher <- unlist(fisher_P)
+  final_max   <- group_pvalue_max
+  final_cauchy <- unlist(cauchy_P)
+  
+  ending_P <- rbind(fda_P_values, final_fisher, final_max, final_cauchy)
+  colnames(ending_P) <- note_total
+  rownames(ending_P) <- c("P_alpha", "Fisher_P", "Min_P", "Cauchy_P")
+  
+  cat(sprintf("[Seed %d] Done.\n", seed))
+  
+  return(ending_P)
+}
+####################################################################################################################
+#==============================================================================
+#  4. Demo
+#==============================================================================
+# 
+# # Run a single replicate
+result <- run_simulation(
+   seed = 42,
+   n = 400,
+   N = 100,
+   dim1 = 4,
+   group_num = 4,
+   K1 = 4,
+   rho = 0,
+   logic_num = 2,
+   pve = 0.95
+ )
+# 
+ print(result)
+#
+# # Run multiple replicates and aggregate
+ n_rep <- 200
+ results_list <- list()
+ for (r in 1:n_rep) {
+   seed_r <- 12345 + r
+   results_list[[r]] <- run_simulation(seed = seed_r)
+ }
+# # Aggregate power: proportion of p-values < 0.05 for each row/column
+ aggregate_power <- function(results_list, alpha = 0.05) {
+   mat <- results_list[[1]]
+   count_sig <- matrix(0, nrow = nrow(mat), ncol = ncol(mat))
+   rownames(count_sig) <- rownames(mat)
+   colnames(count_sig) <- colnames(mat)  
+   for (r in results_list) {
+     count_sig <- count_sig + (r < alpha)
+ }
+   power <- count_sig / length(results_list)
+   return(power)
+ }
+ power_summary <- aggregate_power(results_list)
+ print(power_summary)
+###############################################################################################################################
+
+
+
+
+
 
