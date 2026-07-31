@@ -332,8 +332,8 @@ run_simulation <- function(seed, n = 400, N = 100, dim1 = 4, group_num = 4,
   final_fisher <- unlist(fisher_P)
   final_max   <- group_pvalue_max
   final_cauchy <- unlist(cauchy_P)
-  
-  ending_P <- rbind(fda_P_values, final_fisher, final_max, final_cauchy)
+  sjt_P <- apply(rbind(fda_P_values, final_fisher), 2, max)
+  ending_P <- rbind(fda_P_values, fda_P_values, final_fisher, final_max, final_cauchy, sjt_P)
   colnames(ending_P) <- note_total
   rownames(ending_P) <- c("P_alpha", "Fisher_P", "Min_P", "Cauchy_P")
   
@@ -351,7 +351,7 @@ result <- run_simulation(
    seed = 42,
    n = 400,
    N = 100,
-   dim1 = 4,
+   dim1 = 40,
    group_num = 4,
    K1 = 4,
    rho = 0,
@@ -366,7 +366,17 @@ result <- run_simulation(
  results_list <- list()
  for (r in 1:n_rep) {
    seed_r <- 12345 + r
-   results_list[[r]] <- run_simulation(seed = seed_r)
+   results_list[[r]] <- run_simulation(
+   seed = r,
+   n = 400,
+   N = 100,
+   dim1 = 40,
+   group_num = 4,
+   K1 = 4,
+   rho = 0,
+   logic_num = 2,
+   pve = 0.95
+ )
  }
 # # Aggregate power: proportion of p-values < 0.05 for each row/column
  aggregate_power <- function(results_list, alpha = 0.05) {
