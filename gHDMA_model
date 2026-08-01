@@ -167,11 +167,11 @@ gHDMA <- function(X, M_list, Y, pve = 0.95, family = c("gaussian", "binomial"),
       minp_p[g] <- min(minp_p[g], 1)
     }
   }
-  sjt_p <- apply(rbind(Wilks_p, Fisher_p), 2, max)
+  sjt_p <- apply(rbind(wilks_p, Fisher_p), 2, max)
   # Step 4: Assemble results
   result_df <- data.frame(
     Region = region_names,
-    Wilks_p = wilks_p,
+    wilks_p = wilks_p,
     Fisher_p = fisher_p,
     Cauchy_p = cauchy_p,
     MinP_p = minp_p,
