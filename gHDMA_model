@@ -8,29 +8,21 @@
 #    Y          - Outcome variable (n x 1 vector)
 #    pve        - Proportion of variance explained for FPCA (default = 0.95)
 #    family     - Outcome type: "gaussian" or "binomial" (default = "gaussian")
-#    screening  - Logical; whether to perform Wilks' Lambda screening before
-#                 de-sparsified Lasso (default = TRUE)
-#    alpha_screen - Significance threshold for screening (default = 0.05)
+#    screening  - Logical; whether to perform screening (default = TRUE)
+#    d          - Number of top regions to retain after screening.
+#                 If NULL, automatically determined based on n and family.
 #
 #  Output:
 #    A data frame with one row per gene region, containing:
 #      Region         - Gene region identifier
-#      Wilks_p        - Wilks' Lambda p-value (from multivariate regression)
+#      wilks_p        - Wilks' Lambda p-value
 #      Fisher_p       - Combined p-value via Fisher's method
 #      Cauchy_p       - Combined p-value via Cauchy combination
 #      MinP_p         - Minimum p-value among FPCs (Bonferroni-like)
+#      sjt_p          - max(wilks_p, Fisher_p) for each region
 #      N_FPC          - Number of FPCs retained
-#      Pass_screening - Whether the region passed Wilks' Lambda screening
+#      Pass_screening - Whether the region passed screening
 #==============================================================================
-
-# Required packages: hdi, refund, car, metap, MASS, fda, fdapace (loaded automatically if installed)
-pkgs_needed <- c("hdi", "refund", "car", "metap", "MASS", "fda", "fdapace")
-invisible(lapply(pkgs_needed, function(pkg) {
-  if (!requireNamespace(pkg, quietly = TRUE)) {
-    install.packages(pkg)
-  }
-  library(pkg, character.only = TRUE)
-}))
 
 # Cauchy combination function (internal)
 .cauchy_combine <- function(p) {
@@ -43,32 +35,58 @@ invisible(lapply(pkgs_needed, function(pkg) {
 
 # Main function
 gHDMA <- function(X, M_list, Y, pve = 0.95, family = c("gaussian", "binomial"),
-                  screening = TRUE, alpha_screen = 0.05) {
-  
+                  screening = TRUE, d = NULL) {
+
   family <- match.arg(family)
-  
+
   # Convert X to matrix if needed
   if (is.vector(X)) X <- matrix(X, ncol = 1)
-  
+
+  n <- nrow(X)
   n_groups <- length(M_list)
   region_names <- names(M_list)
   if (is.null(region_names)) region_names <- paste0("Region", 1:n_groups)
-  
+
+  # --------------------------------------------------------------------------
+  # Determine the final number of regions to retain (d_final)
+  # --------------------------------------------------------------------------
+  if (screening) {
+    if (is.null(d)) {
+      # Automatic calculation based on family
+      if (family == "gaussian") {
+        d_candidate <- ceiling(2 * n / log(n))
+      } else {
+        d_candidate <- ceiling(n / (2 * log(n)))
+      }
+      d_final <- min(max(d_candidate, 1), n_groups)
+      message(sprintf("Auto screening: retaining top %d regions (n=%d, family=%s)",
+                      d_final, n, family))
+    } else {
+      # User-specified d
+      d_final <- min(d, n_groups)
+    }
+  } else {
+    d_final <- n_groups  # No screening -> retain all
+  }
+
+  # --------------------------------------------------------------------------
   # Storage
+  # --------------------------------------------------------------------------
   wilks_p <- numeric(n_groups)
   fisher_p <- numeric(n_groups)
   cauchy_p <- numeric(n_groups)
   minp_p <- numeric(n_groups)
   npc_vec <- numeric(n_groups)
   pass_screen <- logical(n_groups)
-  
-  # Step 1: FPCA + Wilks' Lambda for each region
   fpc_scores_list <- list()
-  
+
+  # --------------------------------------------------------------------------
+  # Step 1: FPCA + Wilks' Lambda for each region
+  # --------------------------------------------------------------------------
   for (g in 1:n_groups) {
     M_mat <- M_list[[g]]
     num_sites <- ncol(M_mat)
-    
+
     # FPCA via refund::fpca.sc
     fpca.res <- refund::fpca.sc(
       scale(M_mat),
@@ -76,80 +94,90 @@ gHDMA <- function(X, M_list, Y, pve = 0.95, family = c("gaussian", "binomial"),
       pve = pve,
       var = TRUE
     )
-    
+
     scores <- fpca.res$scores
     npc <- fpca.res$npc
     npc_vec[g] <- npc
     colnames(scores) <- paste0("PC", 1:npc)
     fpc_scores_list[[g]] <- scores
-    
+
     # Multivariate regression: scores ~ X
     fit <- lm(scores ~ X)
     av <- car::Anova(fit)
     av_summary <- summary.Anova.mlm(av)
     test_x <- av_summary$multivariate.tests$X
-    
+
     # Wilks' Lambda
     SSPE.qr <- qr(test_x$SSPE)
     eigs <- Re(eigen(qr.coef(SSPE.qr, test_x$SSPH), symmetric = FALSE)$values)
-    wl <- Wilks(eigs, test_x$df, test_x$df.residual)   # requires source("Wilks.R") or define inline
+    wl <- Wilks(eigs, test_x$df, test_x$df.residual)   # requires source("Wilks.R")
     wilks_p[g] <- pf(wl[2], wl[3], wl[4], lower.tail = FALSE)
-    
-    # Screening decision
-    pass_screen[g] <- ifelse(screening, wilks_p[g] < alpha_screen, TRUE)
   }
-  
-  # Step 2: De-sparsified Lasso on all FPC scores + X
-  # Only include regions that passed screening (if screening = TRUE)
+
+  # --------------------------------------------------------------------------
+  # Step 2: Determine which regions pass screening (based on d_final)
+  # --------------------------------------------------------------------------
+  if (screening && d_final < n_groups) {
+    order_idx <- order(wilks_p)
+    keep_idx <- order_idx[1:d_final]
+    pass_screen <- rep(FALSE, n_groups)
+    pass_screen[keep_idx] <- TRUE
+  } else {
+    pass_screen <- rep(TRUE, n_groups)
+  }
+
+  # --------------------------------------------------------------------------
+  # Step 3: Build design matrix for de-sparsified Lasso
+  # --------------------------------------------------------------------------
   if (screening) {
     keep <- which(pass_screen)
     if (length(keep) == 0) {
       warning("No regions passed screening; returning NA.")
-      result_df <- data.frame(
+      return(data.frame(
         Region = region_names,
-        Wilks_p = wilks_p,
+        wilks_p = wilks_p,
         Fisher_p = NA,
         Cauchy_p = NA,
         MinP_p = NA,
+        sjt_p = NA,
         N_FPC = npc_vec,
         Pass_screening = pass_screen,
         stringsAsFactors = FALSE
-      )
-      return(result_df)
+      ))
     }
     used_scores <- do.call(cbind, fpc_scores_list[keep])
-    # Record mapping from FPC columns to original region indices
     group_map <- rep(keep, times = npc_vec[keep])
   } else {
     used_scores <- do.call(cbind, fpc_scores_list)
     group_map <- rep(1:n_groups, times = npc_vec)
   }
-  
+
   design <- cbind(used_scores, X)
-  
-  # De-sparsified Lasso
+
+  # --------------------------------------------------------------------------
+  # Step 4: De-sparsified Lasso
+  # --------------------------------------------------------------------------
   if (family == "gaussian") {
     hdi_fit <- hdi::lasso.proj(design, Y)
   } else {
     hdi_fit <- hdi::lasso.proj(design, Y, family = "binomial")
   }
-  
-  # Extract p-values for FPC columns only (exclude X)
+
   n_fpc_total <- ncol(used_scores)
   pval_fpc <- hdi_fit$pval[1:n_fpc_total]
-  
-  # Step 3: Combine p-values within each region
-  # Prepare mapping from original region index to its FPC p-values
-  # For regions that passed screening, we have p-values; for those that didn't, we assign NA
+
+  # --------------------------------------------------------------------------
+  # Step 5: Combine p-values within each region
+  # --------------------------------------------------------------------------
   fisher_p[] <- NA
   cauchy_p[] <- NA
   minp_p[] <- NA
-  
+
   unique_regions <- unique(group_map)
   for (g in unique_regions) {
     idx <- which(group_map == g)
     p_group <- pval_fpc[idx]
-    
+
     if (length(p_group) == 1) {
       fisher_p[g] <- p_group
       cauchy_p[g] <- p_group
@@ -158,28 +186,33 @@ gHDMA <- function(X, M_list, Y, pve = 0.95, family = c("gaussian", "binomial"),
       # Fisher's method
       fish <- metap::sumlog(p_group)
       fisher_p[g] <- fish$p
-      
+
       # Cauchy combination
       cauchy_p[g] <- .cauchy_combine(p_group)
-      
-      # Minimum p-value (with Bonferroni correction)
+
+      # Minimum p-value with Bonferroni correction
       minp_p[g] <- min(p_group) * length(p_group)
       minp_p[g] <- min(minp_p[g], 1)
     }
   }
-  sjt_p <- apply(rbind(wilks_p, fisher_p), 2, max)
-  # Step 4: Assemble results
+
+  # jst_p = max(wilks_p, Fisher_p) for each region
+  jst_p <- apply(rbind(wilks_p, fisher_p), 2, max, na.rm = TRUE)
+
+  # --------------------------------------------------------------------------
+  # Step 6: Assemble results
+  # --------------------------------------------------------------------------
   result_df <- data.frame(
     Region = region_names,
-    Wilks_p = wilks_p,
+    wilks_p = wilks_p,
     Fisher_p = fisher_p,
     Cauchy_p = cauchy_p,
     MinP_p = minp_p,
-    sjt_p =  sjt_p,
+    JST_p = jst_p,
     N_FPC = npc_vec,
     Pass_screening = pass_screen,
     stringsAsFactors = FALSE
   )
-  
+
   return(result_df)
 }
