@@ -9,17 +9,17 @@
 #    pve        - Proportion of variance explained for FPCA (default = 0.95)
 #    family     - Outcome type: "gaussian" or "binomial" (default = "gaussian")
 #    screening  - Logical; whether to perform screening (default = TRUE)
-#    d          - Number of top regions to retain after screening.
-#                 If NULL, automatically determined based on n and family.
+#    d          - Number of top effect gene regions to retain after screening.
+#                 If NULL, automatically determined based on sample size (n) and family.
 #
 #  Output:
 #    A data frame with one row per gene region, containing:
 #      Region         - Gene region identifier
-#      wilks_p        - Wilks' Lambda p-value
-#      Fisher_p       - Combined p-value via Fisher's method
+#      wilks_p        - Wilks' Lambda test p-value
+#      Fisher_p       - Combined p-value via Fisher's combination
 #      Cauchy_p       - Combined p-value via Cauchy combination
 #      MinP_p         - Minimum p-value among FPCs (Bonferroni-like)
-#      sjt_p          - max(wilks_p, Fisher_p) for each region
+#      JST_p          - Joint Significance Test for each region, eg, max(wilks_p, fisher_p), max(wilks_p, cauchy_p)
 #      N_FPC          - Number of FPCs retained
 #      Pass_screening - Whether the region passed screening
 #==============================================================================
